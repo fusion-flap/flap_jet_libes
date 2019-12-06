@@ -1,0 +1,20 @@
+@broken_channels.txt
+*00000/86681:
+*86682/88790:BES-2-8,BES-4-2,BES-1-2
+
+*88791/89058:BES-1-6
+BES-1-6 patch is broken, nothing is connected to BES-2-5 and BES-3-5
+
+*89059/89219:BES-1-6
+BES-1-6 patch is broken, KY6-42 <-> BES-3-5 is definitely wrong, position of KY6-46 <-> BES-2-5 is uncertain
+
+*89220/90477:BES-1-6
+BES-1-6 patch is broken, KY6-42 <-> BES-3-5 is definitely wrong, position of KY6-47 <-> BES-2-5  is uncertain
+
+*90478/90654:BES-1-6
+BES-1-6 patch is broken, positions of KY6-47 <-> BES-2-5 and KY6-46 <-> BES-3-5 are uncertain
+
+*90655/00000:BES-1-6
+BES-1-6 patch is broken, positions of KY6-47 <-> BES-2-5 and KY6-46 <-> BES-3-5 are uncertain
+
+#90478:BES-1-6,BES-1-7,BES-1-8,BES-2-8,BES-2-7,BES-2-6,BES-2-5,BES-3-5

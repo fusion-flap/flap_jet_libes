@@ -8,6 +8,8 @@ This is the flap module for JET Lithium BES diagnostic
 """
 
 import os
+import warnings
+import copy
 import numpy as np
 from functools import partial
 import flap
@@ -26,7 +28,8 @@ class LiBESConfig:
         self.chopper_on = None # the dataobject used for getting the ontime of the ky6d beam
         self.chopper_off = None  # the dataobject used for getting the offtime of the ky6d beam
         self.energy_mean = None # the mean energy of the beam  in keV during the plasma
-        self.apd_map = None # the map for storing the fiber configurations
+        self.apd_map = None # the map for storing the fiber names
+        self.fibre_conf = None # an ordered list of the complete fibre configuration
 
         if options["online"] == True:
             self.get_config = partial(online_get_config, self_object=self)
@@ -77,16 +80,19 @@ class LiBESConfig:
                                           data_source = 'JET_LIBES',
                                           exp_id = self.exp_id
                                           )
+    
+    #-----------------------READING THE FIBRE SETUP FILES----------------------
     def read_apd_map(self):
+        '''
+        Read the apd_map file and the broken_fibres file and creates the fibre
+        relevant to the current exp_id. The location of the files is defined 
+        in flap_defaults.cfg
+        INPUT: data is read from flap_defaults.cfg
+        OUTPUT: The channel mapping for the apd
+        '''
+        # getting the apd_map
         filename = flap.config.get("Module JET_LIBES","APD map")
-        if filename[:2] == "."+os.path.sep:
-            location = os.path.dirname(os.path.abspath(__file__))
-            filename = location+os.path.sep+filename[2:]
-        elif filename[:3] == ".."+os.path.sep:
-            curr_path = os.path.dirname(os.path.abspath(__file__))
-            location = os.path.sep.join(curr_path.split(os.path.sep)[:-1])
-            filename = location+os.path.sep+filename[3:]
-
+        filename = find_absolute_path(filename)
         with open(filename, "r") as apdmap:
             #finding the proper mapping based on exp_id
             all_apd_maps = apdmap.read().split("*")
@@ -99,8 +105,8 @@ class LiBESConfig:
             last_map_index = np.where(exp_id_limits[:,1]==0)
             exp_id_limits[last_map_index, 1] = self.exp_id+1
             # the map for the current exp_id is given by
-            map_index = np.where((exp_id_limits[:,0]-self.exp_id < 0) *\
-                                 (exp_id_limits[:,1]-self.exp_id > 0))[0]
+            map_index = np.where((exp_id_limits[:,0]-self.exp_id <= 0) *\
+                                 (exp_id_limits[:,1]-self.exp_id >= 0))[0]
             
             # creating the multidimensional list for mapping
             apd_map = [channelID_variants.split(",") for \
@@ -108,17 +114,142 @@ class LiBESConfig:
             #removing the empty strings
             self.apd_map = [channel for channel in apd_map if channel != [""]]
 
-    def get_channel_id(self, input_channel, map_to = 4, input_spectrometer_tracking=False):
+        # removing the channels defined in the broken channels file
+        # work practically same way as for the apd map file, but since the
+        # files are formatted differently, the code is slightly different
+        filename = flap.config.get("Module JET_LIBES","Broken channels")
+        filename = find_absolute_path(filename)
+        with open(filename, "r") as broken_channels:
+            #finding the proper data in the file based on exp_id
+            all_broken_channels= broken_channels.read().split("*")
+            exp_id_limits = [[int(exp_id) for exp_id in broken_channel.split(":")[0].split("/")]
+                             for broken_channel in all_broken_channels[1:]]
+            exp_id_limits = np.asarray(exp_id_limits)
+            last_map_index = np.where(exp_id_limits[:,1]==0)
+            exp_id_limits[last_map_index, 1] = self.exp_id+1
+            exp_index = np.where((exp_id_limits[:,0]-self.exp_id <= 0) *\
+                                 (exp_id_limits[:,1]-self.exp_id >= 0))[0]
+
+            # getting the broken channels
+            exp_broken_channels = [channels.split(",") for channels in \
+                                   all_broken_channels[1+int(exp_index)].split("\n")[0].split(":")[1:]][0]
+            exp_broken_channels = [channel for channel in exp_broken_channels if channel != [""]]
+            
+            # popping out the broken channels from self.apd_map
+            if len(exp_broken_channels)>0:
+                for channel in exp_broken_channels:
+                    channel_index = np.where([(channel in channel_indices)
+                                                  for channel_indices in self.apd_map])[0]
+                    print("broken channel")    
+                    if len(channel_index)>0:
+                        channel_index = int(channel_index[0])
+                        if channel_index < len(self.apd_map)-1:
+                            self.apd_map = self.apd_map[:channel_index] + \
+                                           self.apd_map[channel_index+1:]
+                        else:
+                            self.apd_map = self.apd_map[:channel_index]
+        return self.apd_map
+    
+    def read_fibre_coords(self):
+        '''
+        Reads the fibre_coords file
+        INPUT: data is read from flap_defaults.cfg
+        OUTPUT: The fibre coords mapping for the apd
+        '''
+        # getting the fibre coordinates. almost the same as getting the apd_map
+        # only some changes had to be implemented
+        filename = flap.config.get("Module JET_LIBES","Fibre coordinates")
+        filename = find_absolute_path(filename)
+        with open(filename, "r") as fibre_coords:
+            #finding the proper mapping based on exp_id
+            all_fibre_coords = fibre_coords.read().split("*")
+            exp_id_limits = [[int(exp_id) for exp_id in fibre_coord.split("\n")[0].split("/")]
+                             for fibre_coord in all_fibre_coords[1:]]
+            exp_id_limits = np.asarray(exp_id_limits)
+
+            last_setup_index = np.where(exp_id_limits[:,1]==0)
+            exp_id_limits[last_setup_index, 1] = self.exp_id+1
+            # the map for the current exp_id is given by
+            setup_index = np.where((exp_id_limits[:,0]-self.exp_id <= 0) *\
+                                   (exp_id_limits[:,1]-self.exp_id >= 0))[0]
+            
+            # creating the multidimensional list for mapping
+            fibre_coord = [channel_coord.split("£") for \
+                           channel_coord in all_fibre_coords[1+int(setup_index)].split("\n")[1:]]
+            
+            # there are a number of lines with commens noted by "£" which should be removed
+            # all lines starting with a "£" are removed, otherwise everything following a
+            # "£" is removed from every line
+            fibre_coord_orig = copy.deepcopy(fibre_coord)
+            for channel in fibre_coord_orig:
+                if channel[0] == "":
+                    fibre_coord.remove(channel)
+                    print("fibre_coord")
+                elif len(channel)>1:
+                    fibre_coord.remove(channel)
+                    channel = channel[0]
+                    fibre_coord.append([channel])
+            
+            fibre_coord = [channel[0].split(",") for channel in fibre_coord]
+            #removing the empty strings
+            for channel in fibre_coord:
+                channel[1] = float(channel[1])
+                channel[2] = float(channel[2])
+                
+        return fibre_coord
+
+    def get_fibre_config(self):
+        '''
+            The main function for reading the fibre setup files.
+            The lines of self.apd_map are read and ordered according to the
+            location of the channels along the beam axis defined in self.fibre_coords.
+            The order is with increasing distance
+        '''
+        # first a large matrix is created which comes from merging self.fibre_coord
+        # into self.apd_map
+        if self.apd_map is None:
+            self.read_apd_map()
+        fibre_coord = self.read_fibre_coords()
+
+        # finding the data in fibre_coord corresponding to the channels in self.apd_map
+        self.fibre_conf = []
+        fibre_coord_names = [fibre_data[0] for fibre_data in fibre_coord]
+        # one needs to take into account that there are some channels in apd_map
+        # for which the location is missing in fibre_coord. These will be dropped
+        # from self.apd_map as well
+        for channel in self.apd_map:
+            torus_hall_name = channel[2]
+            try:
+                fibre_loc_index = fibre_coord_names.index(torus_hall_name)
+                self.fibre_conf.append(channel + fibre_coord[fibre_loc_index][1:])
+            except ValueError:
+                print("fibre_conf")
+
+        
+        # ordering the fibre_conf
+        self.fibre_conf = sorted(self.fibre_conf, key = lambda x: x[5])
+        self.apd_map = [channel[:4], channel in self.fibre_conf]
+
+    #-----------------------FINDING CHANNEL DATA PER NAME----------------------
+    
+    def get_channel_id(self, input_channel, map_to = 4,
+                       input_spectrometer_tracking=False):
         """
         Maps the input_channel to a different naming convention.
-        INPUT: input_channel can be in the form BES-ADCxx
-                                                JPF/DH/KY6D-DOWN:xxx
-                                                JPF/DH/KY6D-FAST:xxx
-                                                BES-x-x
-                                                4AR/4BR...
-                                                KY6-16
-               input_spectrometer_tracking: if the input is the spectrometer
-                tracking number, that should be noted
+        INPUT: input_channel can be a string or a list of strings in the form:
+                      BES-ADCxx
+                      JPF/DH/KY6D-DOWN:xxx
+                      JPF/DH/KY6D-FAST:xxx
+                      BES-x-x
+                      4AR/4BR...
+                      KY6-16
+                      x (spectrometer tracking number, see below)
+               input_spectrometer_tracking: THE FUNCTION DOES NOT TAKE THE
+                   SPECTROMETER TRACKING NUMBER PER DEFAULT AS AN INPUT. (This
+                   may otherwise cause problems.) If the input is the spectrometer
+                   tracking number, that should be noted with the
+                   input_spectrometer_tracking=True keyword
+                
         OUTPUT
             map_to = 0: input_channels name in BES-x-x form
                    = 1: input_channels name in 5AR, 4BL, etc. form
@@ -128,22 +259,37 @@ class LiBESConfig:
                    = 5: input_channels name in JPF/DH/KY6D-DOWN:xxx form
                    = 6: input_channels name in JPF/DH/KY6D-FAST:xxx form
         """
-        input_starter = ""
+        if type(input_channel) == str:
+            return self.get_channel_id_single(input_channel,
+                                              map_to = map_to,
+                                              input_spectrometer_tracking=input_spectrometer_tracking)
+        elif type(input_channel) == list:
+            output = [self.get_channel_id_single(channel, map_to = map_to,
+                      input_spectrometer_tracking=input_spectrometer_tracking)
+                      for channel in input_channel]
+            return output
+        raise ValueError("The input_channel should be either a string or a list of strings")
+
+    def get_channel_id_single(self, input_channel, map_to = 4,
+                              input_spectrometer_tracking=False):
+        """
+        The same as get_channel_id, but input_channel has to be a string
+        """
         if input_channel[:7] == "BES-ADC":
-            input_channel = "0"+input_channel[7:]
-            input_starter = "BES-ADC"
-            if len(input_channel[1:]) != 2 or input_channel.isdigit() is False:
-                raise ValueError(input_starter+input_channel[1:]+" is not a valid name")
+            search_for = "0"+input_channel[7:]
+            print(search_for)
+            if len(search_for) != 3 or search_for.isdigit() is False:
+                raise ValueError(input_channel+" is not a valid name")
         elif input_channel[:17] == "JPF/DH/KY6D-DOWN:":
-            input_channel = input_channel[17:]
-            input_starter = "JPF/DH/KY6D-DOWN:"
-            if len(input_channel) != 3 or input_channel.isdigit() is False:
-                raise ValueError(input_starter+input_channel+" is not a valid name")
+            search_for = input_channel[17:]
+            if len(search_for) != 3 or search_for.isdigit() is False:
+                raise ValueError(input_channel+" is not a valid name")
         elif input_channel[:17] == "JPF/DH/KY6D-FAST:":
-            input_channel = input_channel[17:]
-            input_starter = "JPF/DH/KY6D-FAST:"
-            if len(input_channel) != 3 or input_channel.isdigit() is False:
-                raise ValueError(input_starter+input_channel+" is not a valid name")
+            search_for = input_channel[17:]
+            if len(search_for) != 3 or search_for.isdigit() is False:
+                raise ValueError(input_channel+" is not a valid name")
+        else:
+            search_for = input_channel
 
         output_starter = ""
         if map_to == 4:
@@ -156,12 +302,10 @@ class LiBESConfig:
         if self.apd_map is None:
             self.read_apd_map()
         if input_spectrometer_tracking is False:
-            channel_index = np.where([(input_channel in channel_indices)
+            channel_index = np.where([(search_for in channel_indices[:3]+channel_indices[4:])
                                       for channel_indices in self.apd_map])
         else:
-            a = [channel_indices[3] for channel_indices in self.apd_map]
-            print(a)
-            channel_index = np.where([(input_channel == channel_indices[3])
+            channel_index = np.where([(search_for == channel_indices[3])
                                       for channel_indices in self.apd_map])
 
         if len(channel_index[0]) == 1:
@@ -171,10 +315,94 @@ class LiBESConfig:
                 return output_starter + self.apd_map[int(channel_index[0])][min(map_to,4)]
         elif len(channel_index[0]) > 1:
             matching_channels = [output_starter+self.apd_map[int(index)][min(map_to,4)] for index in channel_index[0]] 
-            raise ValueError("Multiple matching channel names for "+input_starter + input_channel +":" + str(matching_channels))
+            warnings.warn("Multiple matching channel names for "+ input_channel +
+                             ":" + str(matching_channels))
+            return matching_channels
         else:
-            raise ValueError("No matching channel names for "+input_starter + input_channel)
-            
+            raise ValueError("No matching channel names for "+ input_channel +
+                             ". This may happen if your input is a spectrometer tracking number. "+\
+                             "Try input_spectrometer_tracking=True keyword if so.")
+
+
+    def select_signals(self, chspec, options={}):
+        '''Reads and returns the location of the signals defined in chspec
+        INPUT: chspec the list of channels for which the location of the data is needed
+                      Unix style regular expressions are allowed with * and []
+                      Can also be a list of data names, eg. ['BES-1-1','BES-1-3']
+                      The naming conventions for the channels can be in ONE of the following forms
+                          BES-ADCxx
+                          JPF/DH/KY6D-DOWN:xxx
+                          JPF/DH/KY6D-FAST:xxx
+                          BES-x-x
+                          4AR/4BR...
+                          KY6-16
+                          x (spectrometer tracking number string)
+               options:
+                    Mode: Fast/Down: whether to get the fast or the downsampled data
+                    Map to: a number defining the form of the returned strings
+                            see map_to keyword of get_channel_id. Should not be
+                            set together with "Mode"
+        OUTPUT: 2d list of the signals and the map to their location/other names
+        '''
+        options_default = {'Mode': None,
+                           'Map to': None}
+        options = {**options_default, **options}
+        if (options["Mode"] is None) and (options["Map to"] is None):
+            raise ValueError("Either 'Mode' or 'Map to' should be set in the options keyword")
+        elif (options["Mode"] is not None) and (options["Map to"] is not None):
+            raise ValueError("'Mode' and 'Map to' should not both be set in the options" +
+                             "keyword at the same time")
+        
+        if options["Mode"] == "Fast":
+            options["Map to"] = 6
+        elif options["Mode"] == "Down":
+            options["Map to"] = 5
+        
+        #Tries to find the signals under one of the naming conventions
+        for naming_convention in range(0, len(self.apd_map[0])):
+            try:
+                if naming_convention == 4:
+                    # this is needed for the BES-ADCxx, JPF/DH/KY6D-DOWN:xxx,
+                    # JPF/DH/KY6D-FAST:xxx naming conventions
+                    signal_list_temp = [channel[naming_convention] for channel in self.apd_map]
+                    try:
+                        signal_list = self.get_channel_id(signal_list_temp, map_to = 4)
+                        signal_proc, signal_index = flap.select_signals(signal_list, chspec)
+                    except ValueError:
+                        try:
+                            signal_list = self.get_channel_id(signal_list_temp, map_to = 5)
+                            signal_proc, signal_index = flap.select_signals(signal_list, chspec)
+                        except ValueError:
+                            signal_list = self.get_channel_id(signal_list_temp, map_to = 6)
+                            signal_proc, signal_index = flap.select_signals(signal_list, chspec)
+                else:
+                    signal_list = [channel[naming_convention] for channel in self.apd_map] 
+                    signal_proc, signal_index = flap.select_signals(signal_list, chspec)
+                break
+            except ValueError:
+                pass
+        if not("signal_proc" in locals()):
+            raise ValueError("The channel definition "+str(chspec)+" did not match the naming conventions.")
+
+        # Obtains the name of the channels in the form requested
+        # in Options["Map to"] (or Options["Mode"])
+        if naming_convention == 3:
+            new_signal_proc = self.get_channel_id(signal_proc, map_to = options["Map to"],
+                               input_spectrometer_tracking=True)
+        else:
+            new_signal_proc = self.get_channel_id(signal_proc, map_to = options["Map to"],
+                               input_spectrometer_tracking=False)
+
+        return (signal_proc, new_signal_proc)
+
+    def amplitude_calib(self, signal_data, options={}):
+        options_default = {'Amplitude calibration': flap.config.get("Module JET_LIBES","Amplitude calibration")}
+        options = {**options_default, **options}
+
+    def spatial_calib(self, signal_data, options={}):
+            options_default = {'Spatial calibration': flap.config.get("Module JET_LIBES","Spatial calibration")}
+            options = {**options_default, **options}
+
 def online_get_config(self_object, config=None, options={}):
     # The options keyword is passed on to the jetapi.getsignal() function
     # Looking at the flap_defaults.cfg if there are any signal locations defined
@@ -231,7 +459,6 @@ def online_get_chopper(self_object, options={}):
     start_calib = np.min(self_object.data['KY6-CalibTime'].data)
     end_calib = np.max(self_object.data['KY6-CalibTime'].data)
 
-
     for channel in range(0,32):
         try:
             location = "JPF/DH/KY6D-DOWN:"+str(channel+1).zfill(3)
@@ -254,25 +481,45 @@ def jet_libes_get_data(exp_id=None, data_name=None, no_data=False,
     BES-x-x, 4AR/4BR..., KY6-16
     exp_id: Experiment ID
     Unix style regular expressions are allowed with * and []
-                       Can also be a list of data names, eg. ['BES-1-1','ABES-1-3']
+                       Can also be a list of data names, eg. ['BES-1-1','BES-1-3']
     coordinates: List of flap.Coordinate() or a single flap.Coordinate
                  Defines read ranges
                      'Time': The read times
                      'Sample': To be implemented for reading from files
                      Only a single equidistant range is interpreted in c_range.
     options:
-        'Calibration': "Spectrometer" - use the spectrometer calibration data
+        'Amplitude calibration':
+                       "Spectrometer PPF" - use the spectrometer calibration data available as ppf
+                       "Spectrometer cal" - use the spectrometer calibration data to calculate on the fly
                        "APDCAM" - use APDCAM data for calibration
+                       None - the data is not calibrated
+        'Spatial calibration': 
+                       "Spectrometer PPF" - use the spectrometer calibration data available as ppf
+                       "Spectrometer cal" - use the spectrometer calibration data to calculate on the fly
+                       None - the data is not calibrated                       
         'Start delay': delay the chopper interval start point,
         'End delay': delay the chopper interval end point
+        'Mode': Fast/Down whether to get the data from the DH/FAST:xxx or
+                DH/Down:xxx source
+        'UID': The user id to get the data from, can be given as a team, if that
+               team is defined in the flap_defaults.cfg
+        'Cache Data': Whether to Cache the data when it is downloaded from the JET server
+    OUTPUT: signal_data - flap DataObject with the data and coordinates 
+            temporal data: ["Time", "Sample"] for the temporal data
+            channel names: [Pixel Number", "Light Splitting Optics", "Torus Hall", 
+                            "Spectrometer Track", "ADC", "JPF", "LPF"]
+            spatial: "Device Z" if 'Spatial calibration' is set in the options
     """
     if (exp_id is None):
         raise ValueError('exp_id should be set for JET LiBES.')
 
     options_default = {'Datapath': flap.config.get("Module JET_LIBES","Datapath"),
-                       'Calibration': flap.config.get("Module JET_LIBES","Calibration"),
+                       'Amplitude calibration': flap.config.get("Module JET_LIBES","Amplitude calibration"),
+                       'Spatial calibration': flap.config.get("Module JET_LIBES","Spatial calibration"),
                        'Start delay': flap.config.get("Module JET_LIBES","Start delay"),
-                       'End delay': flap.config.get("Module JET_LIBES","End delay")}
+                       'End delay': flap.config.get("Module JET_LIBES","End delay"),
+                       "UID": "KY6-team",
+                       "Cache Data": True}
     options = {**options_default, **options}
 
     configs = LiBESConfig(exp_id)
@@ -303,170 +550,77 @@ def jet_libes_get_data(exp_id=None, data_name=None, no_data=False,
                 break
 
     # Finding the desired channels
-    signal_list = configs.get_config(config='KY6-SignalList')
-    ADC_list = config['ADC_list']
-    try:
-        signal_proc, signal_index = flap.select_signals(signal_list,chspec)
-    except ValueError as e:
-        raise e
-    ADC_proc = []
-    for i in signal_index:
-        ADC_proc.append(ADC_list[i])
-
-
-    scale_to_volts = False
-    dtype = np.int16
-    data_unit = flap.Unit(name='Signal',unit='Digit')
-    if _options is not None:
-        try:
-            if (_options['Scaling'] == 'Volt'):
-                scale_to_volts = True
-                dtype = float
-                data_unit = flap.Unit(name='Signal',unit='Volt')
-        except (NameError, KeyError):
-            pass
-
-    try:
-        offset_timerange = _options['Offset timerange']
-    except (NameError, KeyError):
-        offset_timerange = None
-
-    if (offset_timerange is not None):
-        if (type(offset_timerange) is not list):
-            raise ValueError("Invalid Offset timerange. Should be list or string.")
-        if ((len(offset_timerange) != 2) or (offset_timerange[0] >= offset_timerange[1])) :
-            raise ValueError("Invalid Offset timerange.")
-        offset_samplerange = np.rint((np.array(offset_timerange) - float(config['APDCAM_starttime']))
-                                   / float(config['APDCAM_sampletime']))
-        if ((offset_samplerange[0] < 0) or (offset_samplerange[1] >= config['APDCAM_samplenumber'])):
-            raise ValueError("Offset timerange is out of measurement time.")
-        offset_data = np.empty(len(ADC_proc), dtype='int16')
-        for i_ch in range(len(ADC_proc)):
-            fn = os.path.join(datapath, "Channel_{:03d}.dat".format(ADC_proc[i_ch] - 1))
-            try:
-                f = open(fn,"rb")
-            except OSError:
-                raise OSError("Error opening file: " + fn)
-            try:
-                f.seek(int(offset_samplerange[0]) * 2, os.SEEK_SET)
-                d = np.fromfile(f, dtype=np.int16, count=int(offset_samplerange[1]-offset_samplerange[0])+1)
-            except Exception:
-                raise IOError("Error reading from file: " + fn)
-            offset_data[i_ch] = np.int16(np.mean(d))
-        if (scale_to_volts):
-            offset_data = ((2 ** config['APDCAM_bits'] - 1) - offset_data) \
-                        / (2. ** config['APDCAM_bits'] - 1) * 2
-        else:
-            offset_data = (2 ** config['APDCAM_bits'] - 1) - offset_data
-
-
-    ndata = int(read_samplerange[1] - read_samplerange[0] + 1)
-
-    if (no_data is False):
-        if (len(ADC_proc) is not 1):
-            data_arr = np.empty((ndata, len(ADC_proc)), dtype=dtype)
-        for i in range(len(ADC_proc)):
-            fn = os.path.join(datapath, "Channel_{:03d}.dat".format(ADC_proc[i] - 1))
-            try:
-                f = open(fn,"rb")
-            except OSError:
-                raise OSError("Error opening file: " + fn)
-
-            try:
-                f.seek(int(read_samplerange[0]) * 2, os.SEEK_SET)
-            except Exception:
-                raise IOError("Error reading from file: " + fn)
-
-            if (len(ADC_proc) is 1):
-                try:
-                    data_arr = np.fromfile(f, dtype=np.int16, count=ndata)
-                except Exception:
-                    raise IOError("Error reading from file: " + fn)
-                if (scale_to_volts):
-                    data_arr = ((2 ** config['APDCAM_bits'] - 1) - data_arr) \
-                                / (2. ** config['APDCAM_bits'] - 1) * 2
-                else:
-                    data_arr = (2 ** config['APDCAM_bits'] - 1) - data_arr
-                if (offset_timerange is not None):
-                        data_arr -= offset_data[i]
-            else:
-                try:
-                    d = np.fromfile(f, dtype=np.int16, count=ndata)
-                except Exception:
-                    raise IOError("Error reading from file: " + fn)
-                if (scale_to_volts):
-                    d = ((2 ** config['APDCAM_bits'] - 1) - d) \
-                                / (2. ** config['APDCAM_bits'] - 1) * 2
-                else:
-                    d = (2 ** config['APDCAM_bits'] - 1) - d
-                if (offset_timerange is not None):
-                        d -= offset_data[i]
-                data_arr[:,i] = d
-        f.close
-
-        try:
-            data_arr = calibrate(data_arr, signal_proc, read_range, exp_id=exp_id, options=_options)
-        except Exception as e:
-            raise e
-        data_dim = data_arr.ndim    
+    if options['Amplitude calibration'] == "Spectrometer PPF" or \
+       options['Spatial calibration'] == "Spectrometer PPF":
+        # in this case one has to take into account that there are dead channels
+        # and there were mislabeled ones
+        configs.get_fibre_config()
     else:
-        if (len(ADC_proc) is not 1):
-            data_dim = 2
+        # only the dead channels are omitted from channels that can be used
+        configs.read_apd_map()
+    signal_name, signal_loc = configs.select_signals(chspec, options=options)
+
+    # Obtaining the data for all channels in signal_name
+    signal_data = None
+    for channel in signal_loc:
+        if signal_data is None:
+            signal_data = jetapi.getsignal(exp_id, channel, no_data = no_data, options=options)
         else:
-            data_dim = 1
+            chan_dataobj = jetapi.getsignal(exp_id, channel, no_data = no_data, options=options)
+            if len(signal_data.data.shape) == 1:
+                signal_data.data=np.stack((signal_data.data, chan_dataobj.data), axis=1)
+            else:
+                signal_data.data=np.hstack((signal_data.data, np.expand_dims(chan_dataobj.data, axis=1)))
+    signal_data.shape = signal_data.data.shape
+    signal_data.data_unit.name = "Signal"
+    signal_data.data_unit.unit = "Volt"
+    signal_data.data_title = "JET APDCAM ("+data_name+")"
 
-    coord = [None]*data_dim*2
-    c_mode = flap.CoordinateMode(equidistant=True)
-    coord[0] = copy.deepcopy(flap.Coordinate(name='Time',
-                                             unit='Second',
-                                             mode=c_mode,
-                                             start=read_range[0],
-                                             step=config['APDCAM_sampletime'],
-                                             dimension_list=[0])
-                             )
-    coord[1] = copy.deepcopy(flap.Coordinate(name='Sample',
-                                             unit='n.a.',
-                                             mode=c_mode,
-                                             start=read_samplerange[0],
-                                             step=1,
-                                             dimension_list=[0])
-                             )
-    if (data_dim > 1):
-        ch_proc = []
-        for ch in signal_proc:
-            if (ch[0:4] != 'ABES'):
-                ch_proc = []
-                break
-            ch_proc.append(int(ch[5:]))
-        if (ch_proc != []):
-            c_mode = flap.CoordinateMode(equidistant=False)
-            coord[2] = copy.deepcopy(flap.Coordinate(name='Channel',
-                                                     unit='n.a.',
-                                                     mode=c_mode,
-                                                     shape=len(ch_proc),
-                                                     values=ch_proc,
-                                                     dimension_list=[1])
-                                 )
-        coord[3] = copy.deepcopy(flap.Coordinate(name='Signal name',
-                                                 unit='n.a.',
-                                                 mode=c_mode,
-                                                 shape=len(signal_proc),
-                                                 values=signal_proc,
-                                                 dimension_list=[1])
-                                 )
 
-    data_title = "W7-X ABES data"
-    if (data_arr.ndim == 1):
-        data_title += " (" + signal_proc[0] + ")"
-    d = flap.DataObject(data_array=data_arr,
-                        data_unit=data_unit,
-                        coordinates=coord,
-                        exp_id=exp_id,
-                        data_title=data_title,
-                        info={'Options':_options},
-                        data_source="W7X_ABES")
+    # Adding a coordinate for all versions of the signal_naming
+    signal_names = ["Pixel Number", "Light Splitting Optics", "Torus Hall",
+                    "Spectrometer Track", "ADC", "JPF", "LPF"]
+    for naming_convention in range(0, len(configs.apd_map[0])):
+        new_signal_name = configs.get_channel_id(signal_name,
+                                                 map_to = naming_convention)
+        signal_name_coord = flap.Coordinate(name=signal_names[naming_convention],
+                                            unit='n.a.',
+                                            mode=flap.CoordinateMode(equidistant=False),
+                                            values=new_signal_name,
+                                            dimension_list=[1],
+                                            shape=[len(new_signal_name)])
+        signal_data.add_coordinate_object(signal_name_coord)
+    
+    # Adding a Sample coordinate for the time axis
+    sample_coord = flap.Coordinate(name='Sample',
+                                   unit='n.a.',
+                                   mode=flap.CoordinateMode(equidistant=True),
+                                   start=0,
+                                   step=1,
+                                   dimension_list=[0])
+    signal_data.add_coordinate_object(sample_coord)
+
+
+    # Amplitude calibration of the data
+    if options['Amplitude calibration'] is not None:
+            signal_data = configs.amplitude_calib(signal_data, options=options)  
+
+    # Spatial calibration of the data
+    if options['Spatial calibration'] is not None:
+            signal_data = configs.spatial_calib(signal_data, options=options)  
+
     return d
 
+
+def find_absolute_path(filename):
+    if filename[:2] == "."+os.path.sep:
+        location = os.getcwd()
+        filename = location+os.path.sep+filename[2:]
+    elif filename[:3] == ".."+os.path.sep:
+        curr_path = os.getcwd()
+        location = os.path.sep.join(curr_path.split(os.path.sep)[:-1])
+        filename = location+os.path.sep+filename[3:]
+    return filename
 
 def add_coordinate():
     raise NotImplementedError("Adding coordinates is not JET implemented")
@@ -475,11 +629,22 @@ def register(data_source=None):
     flap.register_data_source('JET_LIBES', get_data_func=jet_libes_get_data, add_coord_func=add_coordinate)
 
 if __name__ == "__main__":
-    conf = LiBESConfig(95939)
-    conf.get_config(config='KY6-AccVoltage')
-    conf.get_config(config='KY6-EmitterVoltage')
+
+    conf = LiBESConfig(95000)
+#    conf = LiBESConfig(95000)
+    conf.get_config(config="KY6-Z", options={"UID": "KY6-team"})
+    conf.get_config(config="PPF/KY6I/BINV", options={"UID": "KY6-team"})
+#    conf.data["KY6-Z"].plot()
+#    conf.read_apd_map()
+    conf.get_fibre_config()
+#    conf.read_apd_map()
+    print(conf.data["KY6-Z"].data.shape)
+    print(len(conf.fibre_conf))
+#    print(len(conf.apd_map))
+#    out1, out2= conf.select_signals("KY6-[6-10]", options={"Mode": "Fast"})
+
+#    jet_libes_get_data(exp_id=95000, data_name="BES-1-[4-6]", no_data=False, options={'Mode': 'Fast'})
 #    conf.get_config(config="KY6-CrossCalib", options={"UID": "KY6-team"})
-    conf.read_apd_map()
 #    register()
 #    
 #    data = flap.get_data('W7X_ABES',
