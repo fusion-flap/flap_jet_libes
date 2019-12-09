@@ -52,31 +52,36 @@ class LiBESConfig:
         time_delay = beam_distance/beam_velocity
         
         mode = flap.CoordinateMode(equidistant=False, range_symmetric=False)
+        
 
-        c_time = flap.Coordinate(name='Time',
+        coff_time = flap.Coordinate(name='Time',
                                  unit='Second',
                                  mode=mode,
                                  values = self.data['KY6-ChopOff'].data[:,0]+time_delay,
-                                 value_ranges=self.data['KY6-ChopOff'].data[:,1]-\
-                                              self.data['KY6-ChopOff'].data[:,0],
+                                 value_ranges=[np.zeros(self.data['KY6-ChopOff'].shape[0]),
+                                               self.data['KY6-ChopOff'].data[:,1]-\
+                                               self.data['KY6-ChopOff'].data[:,0]],
+                                 shape = [self.data['KY6-ChopOff'].shape[0]],
                                  dimension_list=[0])
         self.chopper_off = flap.DataObject(data_shape=[self.data['KY6-ChopOff'].shape[0]],
                                            data_unit=flap.Unit(name='Interval', unit='n.a.'),
-                                           coordinates=[c_time],
+                                           coordinates=[coff_time],
                                            data_source = 'JET_LIBES',
                                            exp_id = self.exp_id
                                            )
 
-        c_time = flap.Coordinate(name='Time',
+        con_time = flap.Coordinate(name='Time',
                                  unit='Second',
                                  mode=mode,
                                  values = self.data['KY6-ChopOn'].data[:,0]+time_delay,
-                                 value_ranges=self.data['KY6-ChopOn'].data[:,1]-\
-                                              self.data['KY6-ChopOn'].data[:,0],
+                                 value_ranges=[np.zeros(self.data['KY6-ChopOn'].shape[0]),
+                                               self.data['KY6-ChopOn'].data[:,1]-\
+                                               self.data['KY6-ChopOn'].data[:,0]],
+                                 shape = [self.data['KY6-ChopOn'].shape[0]],
                                  dimension_list=[0])
         self.chopper_on = flap.DataObject(data_shape=[self.data['KY6-ChopOn'].shape[0]],
                                           data_unit=flap.Unit(name='Interval', unit='n.a.'),
-                                          coordinates=[c_time],
+                                          coordinates=[con_time],
                                           data_source = 'JET_LIBES',
                                           exp_id = self.exp_id
                                           )
@@ -103,10 +108,10 @@ class LiBESConfig:
             # this uppwer exp_id limit will be set to self.exp_id+1 so that it is
             # definitely larger than the current exp_id
             last_map_index = np.where(exp_id_limits[:,1]==0)
-            exp_id_limits[last_map_index, 1] = self.exp_id+1
+            exp_id_limits[last_map_index, 1] = int(self.exp_id)+1
             # the map for the current exp_id is given by
-            map_index = np.where((exp_id_limits[:,0]-self.exp_id <= 0) *\
-                                 (exp_id_limits[:,1]-self.exp_id >= 0))[0]
+            map_index = np.where((exp_id_limits[:,0]-int(self.exp_id) <= 0) *\
+                                 (exp_id_limits[:,1]-int(self.exp_id) >= 0))[0]
             
             # creating the multidimensional list for mapping
             apd_map = [channelID_variants.split(",") for \
@@ -126,9 +131,9 @@ class LiBESConfig:
                              for broken_channel in all_broken_channels[1:]]
             exp_id_limits = np.asarray(exp_id_limits)
             last_map_index = np.where(exp_id_limits[:,1]==0)
-            exp_id_limits[last_map_index, 1] = self.exp_id+1
-            exp_index = np.where((exp_id_limits[:,0]-self.exp_id <= 0) *\
-                                 (exp_id_limits[:,1]-self.exp_id >= 0))[0]
+            exp_id_limits[last_map_index, 1] = int(self.exp_id)+1
+            exp_index = np.where((exp_id_limits[:,0]-int(self.exp_id) <= 0) *\
+                                 (exp_id_limits[:,1]-int(self.exp_id) >= 0))[0]
 
             # getting the broken channels
             exp_broken_channels = [channels.split(",") for channels in \
@@ -168,10 +173,10 @@ class LiBESConfig:
             exp_id_limits = np.asarray(exp_id_limits)
 
             last_setup_index = np.where(exp_id_limits[:,1]==0)
-            exp_id_limits[last_setup_index, 1] = self.exp_id+1
+            exp_id_limits[last_setup_index, 1] = int(self.exp_id)+1
             # the map for the current exp_id is given by
-            setup_index = np.where((exp_id_limits[:,0]-self.exp_id <= 0) *\
-                                   (exp_id_limits[:,1]-self.exp_id >= 0))[0]
+            setup_index = np.where((exp_id_limits[:,0]-int(self.exp_id) <= 0) *\
+                                   (exp_id_limits[:,1]-int(self.exp_id) >= 0))[0]
             
             # creating the multidimensional list for mapping
             fibre_coord = [channel_coord.split("£") for \
@@ -474,11 +479,338 @@ def online_get_chopper(self_object, options={}):
 def offline_get_chopper(self_object, config=None, options={}):
     pass
 
-def jet_libes_get_data(exp_id=None, data_name=None, no_data=False,
-                       options={}, coordinates=None, data_source=None):
+def get_signal_data(exp_id=None, data_name=None, no_data=False,
+                       options={}, coordinates=None, data_source="JET_LIBES"):
+    """ Obtains the signal data fo a JET channel, further info in jet_libes_get_data
+    """
+    
+    configs = LiBESConfig(exp_id)
+    
+    # Finding the desired channels
+    if options['Amplitude calibration'] == "Spectrometer PPF" or \
+       options['Spatial calibration'] == "Spectrometer PPF":
+        # in this case one has to take into account that there are dead channels
+        # and there were mislabeled ones
+        configs.get_fibre_config()
+    else:
+        # only the dead channels are omitted from channels that can be used
+        configs.read_apd_map()
+    signal_name, signal_loc = configs.select_signals(data_name, options=options)
+
+    # Obtaining the data for all channels in signal_name
+    signal_data = None
+    for channel in signal_loc:
+        if signal_data is None:
+            signal_data = jetapi.getsignal(exp_id, channel, no_data = no_data, options=options)
+        else:
+            chan_dataobj = jetapi.getsignal(exp_id, channel, no_data = no_data, options=options)
+            if len(signal_data.data.shape) == 1:
+                signal_data.data=np.stack((signal_data.data, chan_dataobj.data), axis=1)
+            else:
+                signal_data.data=np.hstack((signal_data.data, np.expand_dims(chan_dataobj.data, axis=1)))
+    signal_data.shape = signal_data.data.shape
+    signal_data.data_unit.name = "Signal"
+    signal_data.data_unit.unit = "Volt"
+    signal_data.data_title = "JET APDCAM ("+str(data_name)+")"
+
+
+    # Adding a coordinate for all versions of the signal_naming for multidimensional data
+    if len(signal_data.shape) > 1:
+        signal_names = ["Pixel Number", "Light Splitting Optics", "Torus Hall",
+                        "Spectrometer Track", "ADC", "JPF", "LPF"]
+        for naming_convention in range(0, len(configs.apd_map[0])):
+            new_signal_name = configs.get_channel_id(signal_name,
+                                                     map_to = naming_convention)
+            signal_name_coord = flap.Coordinate(name=signal_names[naming_convention],
+                                                unit='n.a.',
+                                                mode=flap.CoordinateMode(equidistant=False),
+                                                values=new_signal_name,
+                                                dimension_list=[1],
+                                                shape=[len(new_signal_name)])
+            signal_data.add_coordinate_object(signal_name_coord)
+    
+    # Adding a Sample coordinate for the time axis
+    sample_coord = flap.Coordinate(name='Sample',
+                                   unit='n.a.',
+                                   mode=flap.CoordinateMode(equidistant=True),
+                                   start=0,
+                                   step=1,
+                                   dimension_list=[0])
+    signal_data.add_coordinate_object(sample_coord)
+
+
+    # Amplitude calibration of the data
+    if options['Amplitude calibration'] is not None:
+            signal_data = configs.amplitude_calib(signal_data, options=options)  
+
+    # Spatial calibration of the data
+    if options['Spatial calibration'] is not None:
+            signal_data = configs.spatial_calib(signal_data, options=options)
+    
+    return signal_data
+
+
+def proc_chopsignals(exp_id=None,timerange=None,signals='KY6-*', test=None, on_options=None,
+                             off_options=None,  dataobject=None, options={}):
+    """ Calculate signals in beam on and beam/off phases of the measurement and
+        correct the beam-on phases with the beam-off. The result is "LIBES" and "LIBES_back" data object
+        in the FLAP storage.
+        INPUT:
+            There are two modes of this function:
+                The first one obtains the data directly from a measurement file
+                    exp_id: exp_id (no default)
+                    signals: List of measurement signals. Default is KY6-*
+                The second one takes a dataobject as an input
+                    dataobject: the input dataobject file
+            timerange: Time range to process. Default is all times.
+            test: Plot test plots if True
+            options:
+                Average Chopping Period: Whether the data should be averaged for a single chopper time period. Per 
+                                         default this is True. If this option is False then all measurement time points
+                                         of the beam on state is saved. This could be useful if slow beam chopping is
+                                         used and the background signal is reasonably constant relative to the analyzed
+                                         process.
+        OUTPUT: The background subtracted Li-BES data
+    """
+    options_default = {'Average Chopping Period': True}
+    options = {**options_default, **options}
+
+    # Obtaining the chopper data
+    if dataobject is not None:
+        exp_id = dataobject.exp_id
+    
+    o = copy.deepcopy(on_options)
+    o.update({"State":{"Chop":0}}) 
+    d_beam_on=flap.get_data('JET_LIBES',
+                            exp_id=exp_id,
+                            name='Chopper_time',
+                            coordinates={'Time':timerange},
+                            options=o,
+                            object_name='Beam_on',
+                            )
+    o = copy.deepcopy(off_options)
+    o.update({"State":{"Chop":1}}) 
+    d_beam_off=flap.get_data('JET_LIBES',
+                             exp_id=exp_id,
+                             name='Chopper_time',
+                             coordinates={'Time':timerange},
+                             options=o,
+                             object_name='Beam_off',
+                             )
+
+    # Background subtraction
+    if dataobject is None:
+        # in this case the flap storage is used for obtaining the data by experiment ID
+        flap.get_data('JET_LIBES',
+                      exp_id=exp_id,
+                      coordinates={'Time':timerange},
+                      name=signals,
+                      object_name='LIBES'
+                      )
+        if (test):
+            from matplotlib import pyplt as plt
+            plt.close('all')
+            flap.plot('LIBES', axes='Time', plot_options={'marker': 'o'})
+            d_beam_on.plot(plot_type='scatter', axes=['Time', 2], options={'Force': True,'All': True})
+            d_beam_off.plot(plot_type='scatter', axes=['Time', 0.1], options={'Force': True,'All': True})
+        d = flap.slice_data('LIBES',slicing={'Time':d_beam_on})
+        
+        if options['Average Chopping Period'] is True:
+            d = d.slice_data(summing={'Rel. Time in int(Time)':'Mean'})
+            regenerate_time_sample(d)
+        else:
+            add_absolute_time(d)
+
+        flap.add_data_object(d,'LIBES_on')
+        
+        d = flap.slice_data('LIBES',slicing={'Time':d_beam_off})
+        d = d.slice_data(summing={'Rel. Time in int(Time)':'Mean'})
+        regenerate_time_sample(d)    
+        flap.add_data_object(d,'LIBES_off')
+        flap.slice_data('LIBES_off',slicing={'Time':flap.get_data_object('LIBES_on')},options={'Inter':'Linear'},output_name='LIBES_back')
+        # Ensuring that only those samples are kept which also have a background
+        #    flap.slice_data('ABES_on',slicing={'Start Sample in int(Sample)':flap.get_data_object('ABES_off_resampled')},options={'Inter':'Linear'},output_name='ABES_on')
+        
+        if (test):
+            plt.figure()
+            flap.plot('LIBES')
+            flap.plot('LIBES_on',plot_type='scatter')
+            flap.plot('LIBES_on')
+            flap.plot('LIBES_off',plot_type='scatter')
+            flap.plot('LIBES_off')
+            flap.plot('LIBES_back',plot_type='scatter')
+         
+        d=flap.get_data_object('LIBES_on')
+        d_back = flap.get_data_object('LIBES_back')
+        d.data -= d_back.data
+        flap.add_data_object(d,'LIBES')
+        
+#        # error approximation
+#        d_beam_off = flap.get_data_object('ABES_off')
+##        beam_off_data = d_beam_off.slice_data(summing={'Rel. Sample in int(Sample)':'Mean'})
+##        regenerate_time_sample(beam_off_data)
+#        beam_off_data = beam_off_data.slice_data(slicing={'Time':d_beam_off},options={'Inter':'Linear'})
+#        background_error = np.average((d_beam_off.data-beam_off_data.data.reshape(np.shape(d_beam_off.data)))**2, axis=0)\
+#                           *len(beam_off_data.data)/(len(beam_off_data.data)-1)
+
+        flap.delete_data_object(['LIBES_on','LIBES_off','Beam_on','Beam_off'],exp_id=exp_id)
+        if (test):
+            plt.figure()
+            flap.plot('LIBES',axes='Time')
+            
+        return d
+    else:
+        # in this case the passed dataobject is used and the only the copper data is obtained from file
+        dataobject_beam_on = dataobject.slice_data(slicing={'Time': d_beam_on})
+        if options['Average Chopping Period'] is True:
+            #calculating the error of the beam on part
+            reltime = dataobject_beam_on.get_coordinate_object('Rel. Time in int(Time)').dimension_list
+            if len(reltime)>1:
+                raise NotImplementedError('The error approximation for the data only works if the Rel. Rime only' +
+                                          'changes along onedimension')
+            reltime_size = dataobject_beam_on.data.shape[reltime[0]]
+            average = np.mean(dataobject_beam_on.data, axis=reltime[0], keepdims=True)
+            beam_on_error = np.sum((dataobject_beam_on.data-average)**2, axis = reltime[0])/(reltime_size-1)
+            #the averaged density profile:
+            dataobject_beam_on = dataobject_beam_on.slice_data(summing={'Rel. Time in int(Time)':'Mean'})
+            dataobject_beam_on.error = np.sqrt(beam_on_error)
+            regenerate_time_sample(dataobject_beam_on)
+            #estimating of beam on error
+        else:
+            add_absolute_time(dataobject_beam_on)
+            dataobject_beam_on.error = np.zeros(dataobject_beam_on.data.shape)
+        
+        dataobject_beam_off = dataobject.slice_data(slicing={'Time': d_beam_off}, options={'Partial intervals':False})
+        rel_time_coord = dataobject_beam_off.get_coordinate_object('Rel. Time in int(Time)')
+        rel_time_coord.values = rel_time_coord.values[:,1]
+        rel_time_coord.dimension_list = [0]
+        rel_time_coord.shape = rel_time_coord.values.shape
+        dataobject_beam_off = dataobject_beam_off.slice_data(summing={'Rel. Time in int(Time)': 'Mean'})
+        if type(dataobject_beam_off.data) == np.float32:
+            dataobject_beam_off.data = np.asarray(dataobject_beam_off.data)
+        regenerate_time_sample(dataobject_beam_off)
+        dataobject_background = dataobject_beam_off.slice_data(slicing={'Time': dataobject_beam_on},
+                                                               options={'Inter': 'Linear'})
+        dataobject_beam_on.data -= dataobject_background.data.reshape(np.shape(dataobject_beam_on.data))
+
+        # calculating the error for the beam off part
+        dataobject_beam_off_error = copy.deepcopy(dataobject_beam_off)
+        dataobject_beam_off = dataobject.slice_data(slicing={'Time': d_beam_off})
+        reltime = dataobject_beam_off.get_coordinate_object('Rel. Time in int(Time)').dimension_list
+        if len(reltime)>1:
+                raise NotImplementedError('The error approximation for the data only works if the Rel. Sample only' +
+                                          'changes along onedimension')
+        reltime_size = dataobject_beam_off.data.shape[reltime[0]]
+        average = np.mean(dataobject_beam_off.data, axis=reltime[0], keepdims=True)
+        beam_off_error = np.sum((dataobject_beam_off.data-average)**2, axis = reltime[0])/(reltime_size-1)
+        dataobject_beam_off_error.data = np.sqrt(beam_off_error)
+        background_error = dataobject_beam_off_error.slice_data(slicing={'Time': dataobject_beam_on}, options={'Inter': 'Linear'})
+        background_error = background_error.data.reshape(np.shape(dataobject_beam_on.data))
+        dataobject_beam_on.error = np.asarray(np.sqrt(dataobject_beam_on.error**2 + background_error**2))
+
+        return dataobject_beam_on
+
+def add_absolute_time(dataobject):
+    """ Creates a coordinate 'Time' to the input dataobject from proc_chopsignals. This can be used for slicing the
+            data
+        INPUT:
+            d - dataobject, with coordinates Start Time in int(Sample) and Rek. Time in int(Sample)
+        OUTPUT: None, the coordinate is added to the original dataobject
+    """
+    # Finding the coordinates for the dataobject
+    coords = [coord.unit.name for coord in dataobject.coordinates]
+    coord_index = 0
+    dimension_list_time = []
+    for coordinate in coords:
+        # will need to set for the time index
+        if coordinate == 'Start Time in int(Sample)':
+            dimension_list_time = list(dataobject.coordinates[coord_index].dimension_list)+dimension_list_time
+        elif coordinate == 'Rel. Time in int(Sample)':
+            dimension_list_time = list(dataobject.coordinates[coord_index].dimension_list)+dimension_list_time
+        coord_index = coord_index+1
+    dimension_list_time = list(np.unique(np.asarray(dimension_list_time)))
+
+    name = 'Time'
+    time_coord_value = dataobject.coordinate('Start Time in int(Time)')[0] +\
+                       dataobject.coordinate('Rel. Time in int(Time)')[0]
+    time_coord = flap.Coordinate(name=name, unit='Second', values=time_coord_value, shape=np.shape(time_coord_value),
+                 mode=flap.CoordinateMode(equidistant=False), dimension_list=dimension_list_time)
+    dataobject.add_coordinate_object(time_coord)
+
+def regenerate_time_sample(d):
+    """ Regenerate Time and Sample coordinate after chopper slicing aon Sample coordinate
+        and averaging for chopper interval.
+    """
+    try:
+        # Trying to get Time coordinate. If not present regenerating it
+        d.get_coordinate_object('Time')
+    except ValueError:
+        ct = d.get_coordinate_object('Start Time in int(Time)')
+        c_shift = d.get_coordinate_object('Rel. Time in int(Time)')
+        if (c_shift.dimension_list != []):
+            raise ValueError("Rel Time in int(Time) is not constant.")
+        if (not ct.mode.equidistant):
+            try:
+                ct.values += c_shift.values[0]
+            except IndexError:
+                ct.values += c_shift.values
+            #check if new coordinate is equidistant
+            if len(ct.dimension_list) == 1:
+                steps = ct.values[1:]-ct.values[:-1]
+                accuracy = np.max(steps)/np.min(steps)
+                if accuracy-1 < 1e-10:
+                    ct.start = ct.values[0]
+                    ct.step = np.mean(steps)
+                    ct.mode.equidistant = True
+        else:
+            try:
+                ct.start += c_shift.values[0]
+            except IndexError:
+                ct.start += c_shift.values
+        ct.unit.name='Time'
+        
+        d.del_coordinate('Rel. Time in int(Time)')
+#    try:
+#        # Trying to get Sample coordinate. If not present regenerating it
+#        d.get_coordinate_object('Sample')
+#    except ValueError:
+#        ct = d.get_coordinate_object('Start Sample in int(Sample)')
+#        c_shift = d.get_coordinate_object('Rel. Sample in int(Sample)')
+#        if (c_shift.dimension_list != []):
+#            raise ValueError("Rel Sample in int(Sample) is not constant.")
+#        if (not ct.mode.equidistant):
+#            try:
+#                ct.values += c_shift.values[0]
+#            except IndexError:
+#                ct.values += c_shift.values
+#            #check if new coordinate is equidistant
+#            if len(ct.dimension_list) == 1:
+#                steps = ct.values[1:]-ct.values[:-1]
+#                accuracy = np.max(steps)/np.min(steps)
+#                if accuracy-1 < 1e-10:
+#                    ct.start = ct.values[0]
+#                    ct.step = np.mean(steps)
+#                    ct.mode.equidistant = True
+#        else:
+#            try:
+#                ct.start += c_shift.values[0]
+#            except IndexError:
+#                ct.start += c_shift.values
+#        ct.unit.name='Sample'
+#        d.del_coordinate('Rel. Sample in int(Sample)')
+#    try:
+#        d.del_coordinate('Interval(Sample)')
+#        d.del_coordinate('Interval(Sample) sample index')
+#    except ValueError:
+#        pass
+
+def jet_libes_get_data(exp_id=None, data_name=None, no_data=False, 
+                       options={}, coordinates=None, data_source="JET_LIBES"):
     """ Data read function for the JET Li-BES diagnostic
-    data_name: BES-ADCxx, JPF/DH/KY6D-DOWN:xxx, JPF/DH/KY6D-FAST:xxx,
-    BES-x-x, 4AR/4BR..., KY6-16
+    data_name: channel data can be reached under: "BES-ADCxx", "JPF/DH/KY6D-DOWN:xxx",
+                                     "JPF/DH/KY6D-FAST:xxx", "BES-x-x", "4AR"/"4BR"..., "KY6-16"
+               "Chopper_time" : To read the chopper state (will return intervals in Time and Sample ccoordinate)
+
     exp_id: Experiment ID
     Unix style regular expressions are allowed with * and []
                        Can also be a list of data names, eg. ['BES-1-1','BES-1-3']
@@ -501,6 +833,7 @@ def jet_libes_get_data(exp_id=None, data_name=None, no_data=False,
         'End delay': delay the chopper interval end point
         'Mode': Fast/Down whether to get the data from the DH/FAST:xxx or
                 DH/Down:xxx source
+        'State': Need it if "Chopper_time" is given {'Chop': 0} -beam on {'Chop': 1} - beam off
         'UID': The user id to get the data from, can be given as a team, if that
                team is defined in the flap_defaults.cfg
         'Cache Data': Whether to Cache the data when it is downloaded from the JET server
@@ -522,94 +855,52 @@ def jet_libes_get_data(exp_id=None, data_name=None, no_data=False,
                        "Cache Data": True}
     options = {**options_default, **options}
 
-    configs = LiBESConfig(exp_id)
-
     # Ensuring that the data name is a list
     if type(data_name) is not list:
         chspec = [data_name]
     else:
         chspec = data_name
 
-    # Finding read_range (timerange) and read_samplerange
-    read_range = None
-    if (coordinates is not None):
-        if (type(coordinates) is not list):
-             _coordinates = [coordinates]
-        else:
-            _coordinates = coordinates
-        for coord in _coordinates:
-            if (type(coord) is not flap.Coordinate):
-                raise TypeError("Coordinate description should be flap.Coordinate.")
-            if (coord.unit.name is 'Time'):
-                if (coord.mode.equidistant):
-                    read_range = np.asarray([float(coord.c_range[0]),float(coord.c_range[1])])
-                    if (read_range[1] <= read_range[0]):
-                        raise ValueError("Invalid read timerange.")
-                else:
-                    raise NotImplementedError("Non-equidistant Time axis is not implemented yet.")
-                break
-
-    # Finding the desired channels
-    if options['Amplitude calibration'] == "Spectrometer PPF" or \
-       options['Spatial calibration'] == "Spectrometer PPF":
-        # in this case one has to take into account that there are dead channels
-        # and there were mislabeled ones
-        configs.get_fibre_config()
-    else:
-        # only the dead channels are omitted from channels that can be used
-        configs.read_apd_map()
-    signal_name, signal_loc = configs.select_signals(chspec, options=options)
-
-    # Obtaining the data for all channels in signal_name
-    signal_data = None
-    for channel in signal_loc:
-        if signal_data is None:
-            signal_data = jetapi.getsignal(exp_id, channel, no_data = no_data, options=options)
-        else:
-            chan_dataobj = jetapi.getsignal(exp_id, channel, no_data = no_data, options=options)
-            if len(signal_data.data.shape) == 1:
-                signal_data.data=np.stack((signal_data.data, chan_dataobj.data), axis=1)
-            else:
-                signal_data.data=np.hstack((signal_data.data, np.expand_dims(chan_dataobj.data, axis=1)))
-    signal_data.shape = signal_data.data.shape
-    signal_data.data_unit.name = "Signal"
-    signal_data.data_unit.unit = "Volt"
-    signal_data.data_title = "JET APDCAM ("+data_name+")"
-
-
-    # Adding a coordinate for all versions of the signal_naming
-    signal_names = ["Pixel Number", "Light Splitting Optics", "Torus Hall",
-                    "Spectrometer Track", "ADC", "JPF", "LPF"]
-    for naming_convention in range(0, len(configs.apd_map[0])):
-        new_signal_name = configs.get_channel_id(signal_name,
-                                                 map_to = naming_convention)
-        signal_name_coord = flap.Coordinate(name=signal_names[naming_convention],
-                                            unit='n.a.',
-                                            mode=flap.CoordinateMode(equidistant=False),
-                                            values=new_signal_name,
-                                            dimension_list=[1],
-                                            shape=[len(new_signal_name)])
-        signal_data.add_coordinate_object(signal_name_coord)
+#    # Finding read_range (timerange) and read_samplerange
+#    read_range = None
+#    if (coordinates is not None):
+#        if (type(coordinates) is not list):
+#             _coordinates = [coordinates]
+#        else:
+#            _coordinates = coordinates
+#        for coord in _coordinates:
+#            if (type(coord) is not flap.Coordinate):
+#                raise TypeError("Coordinate description should be flap.Coordinate.")
+#            if (coord.unit.name is 'Time'):
+#                if (coord.mode.equidistant):
+#                    read_range = np.asarray([float(coord.c_range[0]),float(coord.c_range[1])])
+#                    if (read_range[1] <= read_range[0]):
+#                        raise ValueError("Invalid read timerange.")
+#                else:
+#                    raise NotImplementedError("Non-equidistant Time axis is not implemented yet.")
+#                break
     
-    # Adding a Sample coordinate for the time axis
-    sample_coord = flap.Coordinate(name='Sample',
-                                   unit='n.a.',
-                                   mode=flap.CoordinateMode(equidistant=True),
-                                   start=0,
-                                   step=1,
-                                   dimension_list=[0])
-    signal_data.add_coordinate_object(sample_coord)
-
-
-    # Amplitude calibration of the data
-    if options['Amplitude calibration'] is not None:
-            signal_data = configs.amplitude_calib(signal_data, options=options)  
-
-    # Spatial calibration of the data
-    if options['Spatial calibration'] is not None:
-            signal_data = configs.spatial_calib(signal_data, options=options)  
-
-    return d
+    if not (chspec == ["Chopper_time"]):
+        # In this case the actual channel data is obtained
+        signal_data = get_signal_data(exp_id=exp_id, data_name=chspec, no_data=no_data,
+                       options=options, coordinates=coordinates, data_source=data_source)
+        return signal_data
+    
+    else:
+        if "State" not in options:
+            raise ValueError("State should be given in the options keyword if"+
+                             " chopper dataobject is requested it.")
+            return None
+        elif not ((options["State"] == {'Chop': 0}) or (options["State"] == {'Chop': 1})):
+            raise ValueError("options['State'] should be either {'Chop': 0} (beam on)"+
+                             " or {'Chop': 1} (beam off).")
+            return None
+        configs = LiBESConfig(exp_id)
+        configs.get_chopper(options=options)
+        if options["State"]["Chop"]==0:
+            return configs.chopper_off
+        else:
+            return configs.chopper_on   
 
 
 def find_absolute_path(filename):
@@ -627,31 +918,3 @@ def add_coordinate():
 
 def register(data_source=None):
     flap.register_data_source('JET_LIBES', get_data_func=jet_libes_get_data, add_coord_func=add_coordinate)
-
-if __name__ == "__main__":
-
-    conf = LiBESConfig(95000)
-#    conf = LiBESConfig(95000)
-    conf.get_config(config="KY6-Z", options={"UID": "KY6-team"})
-    conf.get_config(config="PPF/KY6I/BINV", options={"UID": "KY6-team"})
-#    conf.data["KY6-Z"].plot()
-#    conf.read_apd_map()
-    conf.get_fibre_config()
-#    conf.read_apd_map()
-    print(conf.data["KY6-Z"].data.shape)
-    print(len(conf.fibre_conf))
-#    print(len(conf.apd_map))
-#    out1, out2= conf.select_signals("KY6-[6-10]", options={"Mode": "Fast"})
-
-#    jet_libes_get_data(exp_id=95000, data_name="BES-1-[4-6]", no_data=False, options={'Mode': 'Fast'})
-#    conf.get_config(config="KY6-CrossCalib", options={"UID": "KY6-team"})
-#    register()
-#    
-#    data = flap.get_data('W7X_ABES',
-#                         name='ABES-'+str(channel),
-#                         exp_id=shotID,
-#                         object_name='ABES-'+str(channel)+' DATA',
-#                         options={'Calibration': True,
-#                                  'Calib. path': '/data/W7-X/APDCAM/cal/',
-#                                  'Scaling': 'Volt'})
-#    data=conf.get_chopper()
