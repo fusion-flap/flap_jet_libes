@@ -10,6 +10,7 @@ This is the flap module for JET Lithium BES diagnostic
 import os
 import warnings
 import copy
+import gc
 import numpy as np
 from functools import partial
 import flap
@@ -30,6 +31,7 @@ class LiBESConfig:
         self.energy_mean = None # the mean energy of the beam  in keV during the plasma
         self.apd_map = None # the map for storing the fiber names
         self.fibre_conf = None # an ordered list of the complete fibre configuration
+        self.spect_ppf_map = None # the spectrometer channels, their z coordinate and Beam-into-gas calibration factors
 
         if options["online"] == True:
             self.get_config = partial(online_get_config, self_object=self)
@@ -57,7 +59,6 @@ class LiBESConfig:
         
         mode = flap.CoordinateMode(equidistant=False, range_symmetric=False)
         
-        print(options["Start delay"])
         choff = self.data['KY6-ChopOff'].data
         chon = self.data['KY6-ChopOn'].data
         choff[:,0] = choff[:,0] + options["Start delay"]*1e-6
@@ -252,7 +253,7 @@ class LiBESConfig:
         
         # ordering the fibre_conf
         self.fibre_conf = sorted(self.fibre_conf, key = lambda x: x[5])
-        self.apd_map = [channel[:4], channel in self.fibre_conf]
+        self.apd_map = [channel[:5] for channel in self.fibre_conf]
 
     #-----------------------FINDING CHANNEL DATA PER NAME----------------------
     
@@ -322,7 +323,7 @@ class LiBESConfig:
             output_starter = "JPF/DH/KY6D-DOWN:"
         elif map_to == 6:
             output_starter = "JPF/DH/KY6D-FAST:"
-
+        
         if self.apd_map is None:
             self.read_apd_map()
         if input_spectrometer_tracking is False:
@@ -418,14 +419,81 @@ class LiBESConfig:
                                input_spectrometer_tracking=False)
 
         return (signal_proc, new_signal_proc)
+    
+    def get_spect_ppf_map(self):
+        if hasattr(self, "KY6-Z") is False:
+            self.get_config(config="KY6-Z", options={"UID":"KY6-team"})
+        if hasattr(self, "KY6-Bind") is False:
+            self.get_config(config="KY6-Bind", options={"UID":"KY6-team"})
+        if hasattr(self, "KY6-CrossCalib") is False:
+            self.get_config(config="KY6-CrossCalib", options={"UID":"KY6-team"})
+        self.spect_ppf_map = np.zeros((3,self.data["KY6-Bind"].data.shape[1]))
+        self.spect_ppf_map[0,:]=self.data["KY6-Bind"].data+1
+        self.spect_ppf_map[1,:]=self.data["KY6-Z"].data
+        self.spect_ppf_map[2,:]=self.data["KY6-CrossCalib"].data/np.mean(self.data["KY6-CrossCalib"].data)       
 
     def amplitude_calib(self, signal_data, options={}):
         options_default = {'Amplitude calibration': flap.config.get("Module JET_LIBES","Amplitude calibration")}
         options = {**options_default, **options}
 
+        if options['Amplitude calibration'] == "Spectrometer PPF":
+            if self.spect_ppf_map is None:
+                self.get_spect_ppf_map()
+            channels = copy.deepcopy(signal_data.get_coordinate_object("Spectrometer Track"))
+            if len(channels.dimension_list)>1:
+                raise ValueError("Spectrometer PPF Amplitude calibration only works if the channels only vary along one dimension")
+            chan_index=0
+            missing_data_from_spect = False
+            slicer = [slice(None)]*len(signal_data.shape)
+            for channel in channels.values:
+                slicer[channels.dimension_list[0]] = chan_index
+                if channel =="0":
+                    signal_data.data[tuple(slicer)] = None
+                    missing_data_from_spect = True
+                else:
+                    pass
+                    signal_data.data[tuple(slicer)] = signal_data.data[tuple(slicer)]/\
+                        self.spect_ppf_map[2,np.where(self.spect_ppf_map[0,:]==int(channel))][0,0]
+                chan_index = chan_index+1
+            if missing_data_from_spect is True:
+                    signal_data.info = signal_data.info + "Could not obtain Spectrometer PPF Amplitude calibration factor for a number of channels."+\
+                                       " They were not plugged into the spectrometer./n"
+            signal_data.data_unit.unit = "a.u."
+        return signal_data 
+                    
+
     def spatial_calib(self, signal_data, options={}):
             options_default = {'Spatial calibration': flap.config.get("Module JET_LIBES","Spatial calibration")}
             options = {**options_default, **options}
+
+            if options['Spatial calibration'] == "Spectrometer PPF":
+                if self.spect_ppf_map is None:
+                    self.get_spect_ppf_map()
+
+                channels = copy.deepcopy(signal_data.get_coordinate_object("Spectrometer Track"))
+                if len(channels.dimension_list)>1:
+                    raise ValueError("Spectrometer PPF Spatial calibration only works if the channels only vary along one dimension")
+                coord_val = np.zeros(len(channels.values))
+                missing_data_from_spect = False
+                index=0
+                for channel in channels.values:
+                    if channel == "0":
+                        missing_data_from_spect = True
+                        coord_val[index] = None # the channel is not connected to the spectrometer
+                    else:
+                        coord_val[index] = self.spect_ppf_map[1,np.where(self.spect_ppf_map[0,:]==int(channel))]
+                    index = index+1
+                if missing_data_from_spect is True:
+                    signal_data.info = signal_data.info + "Could not obtain Spectrometer PPF Z coordinate for a number of channels."+\
+                                       " They were not plugged into the spectrometer./n"
+                    coord_val[np.where(coord_val==0)] = None
+                channels.unit.name =  "Device Z"
+                channels.unit.unit =  "m"
+                channels.values = coord_val
+                signal_data.add_coordinate_object(channels)
+            return signal_data
+                
+
 
 def online_get_config(self_object, config=None, options={}):
     # The options keyword is passed on to the jetapi.getsignal() function
@@ -558,6 +626,8 @@ def get_signal_data(exp_id=None, data_name=None, no_data=False,
                                    step=1,
                                    dimension_list=[0])
     signal_data.add_coordinate_object(sample_coord)
+    
+    signal_data.get_coordinate_object("Time").unit.unit = "Second"
 
 
     # Amplitude calibration of the data
@@ -570,7 +640,7 @@ def get_signal_data(exp_id=None, data_name=None, no_data=False,
     
     return signal_data
 
-def proc_chopsignals_signle(exp_id=None,timerange=None,signals='KY6-1', test=None, on_options={},
+def proc_chopsignals_single(exp_id=None,timerange=None,signals='KY6-1', test=None, on_options={},
                              off_options={},  dataobject=None, options={}):
     """ Calculate signals in beam on and beam/off phases of the measurement of a single channel and
         correct the beam-on phases with the beam-off. The result is "LIBES" and "LIBES_back" data object
@@ -663,10 +733,9 @@ def proc_chopsignals(dataobject=None, timerange=None, test=None, on_options={},
     for name in naming_conventions:
         if name in dataobject.coordinate_names():
             channel_naming.append(name)
-            break
     
     if len(channel_naming)==0:
-        processed_data = proc_chopsignals(dataobject=dataobject, timerange=timerange,
+        processed_data = proc_chopsignals_single(dataobject=dataobject, timerange=timerange,
                                           test=test, on_options=on_options,
                                           off_options=off_options,  options=options)
     else:
@@ -674,23 +743,31 @@ def proc_chopsignals(dataobject=None, timerange=None, test=None, on_options={},
         for channel in channels:
             channel_data = dataobject.slice_data(slicing={channel_naming[0]: channel})
             if not ("processed_data" in locals()):
-                processed_data = proc_chopsignals(dataobject=channel_data, timerange=timerange,
-                                          test=test, on_options=on_options,
-                                          off_options=off_options,  options=options)
+                processed_data = proc_chopsignals_single(dataobject=channel_data,
+                                                         timerange=timerange,
+                                                         test=test, on_options=on_options,
+                                                         off_options=off_options,  options=options)
             else:
                 partial_processed_data = proc_chopsignals(dataobject=channel_data, timerange=timerange,
                                           test=test, on_options=on_options,
                                           off_options=off_options,  options=options)
                 if len(processed_data.data.shape) == 1:
                     processed_data.data=np.stack((processed_data.data, partial_processed_data.data), axis=1)
+                    processed_data.error=np.stack((processed_data.error, partial_processed_data.error), axis=1)
                 else:
                     processed_data.data=np.hstack((processed_data.data, np.expand_dims(partial_processed_data.data, axis=1)))
-        # adding the channel coordinate
-        for naming in channel_naming:
-            naming_coord = dataobject.get_coordinate_object(naming)
-            naming_coord.dimension_list = [1]
-            processed_data.add_coordinate_object(naming_coord)
-            
+                    processed_data.error=np.hstack((processed_data.error, np.expand_dims(partial_processed_data.error, axis=1)))
+
+#                del partial_processed_data
+#                gc.collect()
+        processed_data.shape = processed_data.data.shape
+        # adding the channel coordinates
+        channel_dimension = dataobject.get_coordinate_object(channel_naming[0]).dimension_list
+        for coordinate in dataobject.coordinates:
+            if coordinate.dimension_list == channel_dimension:
+                naming_coord = copy.deepcopy(coordinate)
+                naming_coord.dimension_list = [1]
+                processed_data.add_coordinate_object(naming_coord)
     return processed_data
 
 def process_chopped_dataobject(dataobject, options={}):
@@ -796,6 +873,7 @@ def regenerate_time_sample(d):
             except IndexError:
                 ct.start += c_shift.values
         ct.unit.name='Time'
+        ct.unit.unit='Second'
         
         d.del_coordinate('Rel. Time in int(Time)')
 #    try:
