@@ -302,7 +302,6 @@ class LiBESConfig:
         """
         if input_channel[:7] == "BES-ADC":
             search_for = "0"+input_channel[7:]
-            print(search_for)
             if len(search_for) != 3 or search_for.isdigit() is False:
                 raise ValueError(input_channel+" is not a valid name")
         elif input_channel[:17] == "JPF/DH/KY6D-DOWN:":
@@ -436,29 +435,73 @@ class LiBESConfig:
         options_default = {'Amplitude calibration': flap.config.get("Module JET_LIBES","Amplitude calibration")}
         options = {**options_default, **options}
 
-        if options['Amplitude calibration'] == "Spectrometer PPF":
+        if options['Amplitude calibration'] == "Spectrometer BIG":
             if self.spect_ppf_map is None:
                 self.get_spect_ppf_map()
             channels = copy.deepcopy(signal_data.get_coordinate_object("Spectrometer Track"))
             if len(channels.dimension_list)>1:
-                raise ValueError("Spectrometer PPF Amplitude calibration only works if the channels only vary along one dimension")
+                raise ValueError("Spectrometer BIG Amplitude calibration only works if the channels only vary along one dimension")
             chan_index=0
             missing_data_from_spect = False
             slicer = [slice(None)]*len(signal_data.shape)
             for channel in channels.values:
                 slicer[channels.dimension_list[0]] = chan_index
                 if channel =="0":
-                    signal_data.data[tuple(slicer)] = None
+                    signal_data.data[tuple(slicer)] = 0
                     missing_data_from_spect = True
                 else:
-                    pass
-                    signal_data.data[tuple(slicer)] = signal_data.data[tuple(slicer)]/\
+                    signal_data.data[tuple(slicer)] = signal_data.data[tuple(slicer)]*\
                         self.spect_ppf_map[2,np.where(self.spect_ppf_map[0,:]==int(channel))][0,0]
                 chan_index = chan_index+1
             if missing_data_from_spect is True:
                     signal_data.info = signal_data.info + "Could not obtain Spectrometer PPF Amplitude calibration factor for a number of channels."+\
                                        " They were not plugged into the spectrometer./n"
             signal_data.data_unit.unit = "a.u."
+
+        elif options['Amplitude calibration'] == "Spectrometer PPF":
+            #Doing first a calibration with the BIG
+            o = copy.deepcopy(options)
+            o['Amplitude calibration'] = "Spectrometer BIG"
+            signal_data = self.amplitude_calib(signal_data, options=o)
+            # Ideally the previous part would be enough for the amplitude calibration
+            # but the calibration coefficients of the apdcam and the spectrometer are
+            # quite different, therefore a relative calibration between the two is also
+            # necessary. This one should not vary too much between shots as long the
+            # components of the diagnostic do not move.
+            if self.spect_ppf_map is None:
+                self.get_spect_ppf_map()
+            channels = copy.deepcopy(signal_data.get_coordinate_object("Spectrometer Track"))
+
+            time_coord = signal_data.coordinate("Time")[0]
+            time_window = [np.min(time_coord), np.max(time_coord)]
+            
+            #getting the spectrometer light profiles:
+            if 'PPF/KY6I/AINT' not in self.data:
+                self.get_config(config="KY6-AINT", options={"UID":"KY6-team"})
+                spect_track_coord_val = np.asarray([str(int(tracknum)) for tracknum in self.spect_ppf_map[0,:]])
+                spect_track_coord = flap.Coordinate(name="Spectrometer Track",
+                                                unit='n.a.',
+                                                mode=flap.CoordinateMode(equidistant=False),
+                                                values=spect_track_coord_val,
+                                                dimension_list=[1],
+                                                shape=spect_track_coord_val.shape)
+                self.data["KY6-AINT"].add_coordinate_object(spect_track_coord)
+            spectrometer_data = self.data["KY6-AINT"].slice_data(slicing={"Time":flap.Intervals(time_window[0],time_window[1])})
+            
+            # in case that the spectrometer time window is shorter
+            spectrometer_time = spectrometer_data.coordinate("Time")[0]
+            spect_time_window = [np.min(spectrometer_time), np.max(spectrometer_time)]
+            signal_data_calib = signal_data.slice_data(slicing={"Time":flap.Intervals(spect_time_window[0],spect_time_window[1])})
+            
+            slicer = [slice(None)]*len(signal_data.shape)
+            chan_index=0
+            for channel in channels.values:
+                slicer[channels.dimension_list[0]] = chan_index
+                if not (channel == "0"):
+                    apdcam_chan_mean = np.mean(signal_data_calib.slice_data(slicing={"Spectrometer Track":channel}).data)
+                    spectrometer_chan_mean = np.mean(spectrometer_data.slice_data(slicing={"Spectrometer Track":channel}).data)
+                    signal_data.data[tuple(slicer)] = signal_data.data[tuple(slicer)]*spectrometer_chan_mean/apdcam_chan_mean
+                chan_index = chan_index+1
         return signal_data 
                     
 
@@ -580,7 +623,8 @@ def get_signal_data(exp_id=None, data_name=None, no_data=False,
        options['Spatial calibration'] == "Spectrometer PPF":
         # in this case one has to take into account that there are dead channels
         # and there were mislabeled ones
-        configs.get_fibre_config()
+#        configs.get_fibre_config()
+        configs.read_apd_map()
     else:
         # only the dead channels are omitted from channels that can be used
         configs.read_apd_map()
@@ -717,6 +761,10 @@ def proc_chopsignals_single(exp_id=None,timerange=None,signals='KY6-1', test=Non
     background_error = background_error.data.reshape(np.shape(dataobject_beam_on.data))
     dataobject_beam_on.error = np.asarray(np.sqrt(dataobject_beam_on.error**2 + background_error**2))
 
+    if (test):
+        plt.plot(dataobject_beam_on.get_coordinate_object("Time").values,
+                 dataobject_beam_on.data)
+
     return dataobject_beam_on
 
 
@@ -748,7 +796,7 @@ def proc_chopsignals(dataobject=None, timerange=None, test=None, on_options={},
                                                          test=test, on_options=on_options,
                                                          off_options=off_options,  options=options)
             else:
-                partial_processed_data = proc_chopsignals(dataobject=channel_data, timerange=timerange,
+                partial_processed_data = proc_chopsignals_single(dataobject=channel_data, timerange=timerange,
                                           test=test, on_options=on_options,
                                           off_options=off_options,  options=options)
                 if len(processed_data.data.shape) == 1:
@@ -815,6 +863,12 @@ def process_chopped_dataobject(dataobject, options={}):
     dataobject.get_coordinate_object("Time").start=None
     dataobject.get_coordinate_object("Time").step=None
     
+    #ordering the data along the time coordinate
+    time_data = np.asarray(sorted(zip(dataobject.get_coordinate_object("Time").values,
+                                      dataobject.data)))
+    dataobject.get_coordinate_object("Time").values = time_data[:,0]
+    dataobject.data = time_data[:,1]
+    
     return dataobject
 
 def add_absolute_time(dataobject):
@@ -856,7 +910,7 @@ def regenerate_time_sample(d):
         c_shift = d.get_coordinate_object('Rel. Time in int(Time)')
         if (not ct.mode.equidistant):
             try:
-                ct.values += c_shift.values[0]
+                ct.values += np.nanmean(c_shift.values, axis=c_shift.dimension_list[0])
             except IndexError:
                 ct.values += c_shift.values
             #check if new coordinate is equidistant
