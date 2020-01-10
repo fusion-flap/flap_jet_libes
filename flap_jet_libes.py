@@ -219,7 +219,7 @@ class LiBESConfig:
                 channel[1] = float(channel[1])
                 channel[2] = float(channel[2])
                 
-        return 
+        return fibre_coord
     
     def get_fibre_config(self):
         '''
@@ -422,7 +422,11 @@ class LiBESConfig:
             self.get_config(config="KY6-Bind", options={"UID":"KY6-team"})
         if hasattr(self, "KY6-CrossCalib") is False:
             self.get_config(config="KY6-CrossCalib", options={"UID":"KY6-team"})
-        self.spect_ppf_map = np.zeros((3,self.data["KY6-Bind"].data.shape[1]))
+        if len(self.data["KY6-Bind"].data.shape)>1:
+            channel_num = self.data["KY6-Bind"].data.shape[1]
+        else:
+            channel_num = self.data["KY6-Bind"].data.shape[0]
+        self.spect_ppf_map = np.zeros((3,channel_num))
         self.spect_ppf_map[0,:]=self.data["KY6-Bind"].data+1
         self.spect_ppf_map[1,:]=self.data["KY6-Z"].data
         self.spect_ppf_map[2,:]=self.data["KY6-CrossCalib"].data/np.mean(self.data["KY6-CrossCalib"].data)       
@@ -549,11 +553,13 @@ class LiBESConfig:
                 signal_data.get_coordinate_object("Device Z").values = newz_dataindex[:,0]
                 slicer[z_coord.dimension_list[0]] = tuple(newz_dataindex[:,1].astype("int"))
                 signal_data.data = signal_data.data[tuple(slicer)]
+                if signal_data.error is not None:
+                    signal_data.error = signal_data.error[tuple(slicer)]
                 # need to change the order of every other coordinate that is 
                 for coordinate in signal_data.coordinates:
-                    if z_coord.dimension_list == coordinate.dimension_list:
+                    if z_coord.dimension_list == coordinate.dimension_list and coordinate.unit.name != "Device Z":
                         coordinate.values = coordinate.values[newz_dataindex[:,1].astype("int")]
-                    
+
             return signal_data
                 
 
