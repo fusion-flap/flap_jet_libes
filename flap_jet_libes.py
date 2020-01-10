@@ -165,7 +165,6 @@ class LiBESConfig:
                 for channel in exp_broken_channels:
                     channel_index = np.where([(channel in channel_indices)
                                                   for channel_indices in self.apd_map])[0]
-                    print("broken channel")    
                     if len(channel_index)>0:
                         channel_index = int(channel_index[0])
                         if channel_index < len(self.apd_map)-1:
@@ -209,7 +208,6 @@ class LiBESConfig:
             for channel in fibre_coord_orig:
                 if channel[0] == "":
                     fibre_coord.remove(channel)
-                    print("fibre_coord")
                 elif len(channel)>1:
                     fibre_coord.remove(channel)
                     channel = channel[0]
@@ -221,11 +219,11 @@ class LiBESConfig:
                 channel[1] = float(channel[1])
                 channel[2] = float(channel[2])
                 
-        return fibre_coord
-
+        return 
+    
     def get_fibre_config(self):
         '''
-            The main function for reading the fibre setup files.
+            The function for reading and merging all of the fibre setup files.
             The lines of self.apd_map are read and ordered according to the
             location of the channels along the beam axis defined in self.fibre_coords.
             The order is with increasing distance
@@ -248,12 +246,10 @@ class LiBESConfig:
                 fibre_loc_index = fibre_coord_names.index(torus_hall_name)
                 self.fibre_conf.append(channel + fibre_coord[fibre_loc_index][1:])
             except ValueError:
-                print("fibre_conf")
-
-        
+                pass # the channel is missing rom the fibre_coord file
         # ordering the fibre_conf
         self.fibre_conf = sorted(self.fibre_conf, key = lambda x: x[5])
-        self.apd_map = [channel[:5] for channel in self.fibre_conf]
+        return self.fibre_conf
 
     #-----------------------FINDING CHANNEL DATA PER NAME----------------------
     
@@ -506,9 +502,9 @@ class LiBESConfig:
                     
 
     def spatial_calib(self, signal_data, options={}):
-            options_default = {'Spatial calibration': flap.config.get("Module JET_LIBES","Spatial calibration")}
+            options_default = {'Spatial calibration': flap.config.get("Module JET_LIBES","Spatial calibration"),
+                               'Sort data with Device Z': True}
             options = {**options_default, **options}
-
             if options['Spatial calibration'] == "Spectrometer PPF":
                 if self.spect_ppf_map is None:
                     self.get_spect_ppf_map()
@@ -534,9 +530,32 @@ class LiBESConfig:
                 channels.unit.unit =  "m"
                 channels.values = coord_val
                 signal_data.add_coordinate_object(channels)
+            
+            if options['Sort data with Device Z'] is True:
+                z_coord = signal_data.get_coordinate_object("Device Z")
+                if len(z_coord.dimension_list)>1:
+                    raise ValueError ("Can not sort data along Device Z, coordinate varies over multiple dimensions.")
+                for coordinate in signal_data.coordinates:
+                    if z_coord.dimension_list[0] in coordinate.dimension_list and \
+                    not (z_coord.dimension_list == coordinate.dimension_list):
+                        raise ValueError("Can not sort along Device Z, "+coordinate.name+" varies along"+
+                                         "multiple dimensions of the data and also varies with Device Z")
+            
+                slicer = [slice(None)]*len(signal_data.shape)
+                newz_dataindex = np.zeros([len(z_coord.values),2])
+                newz_dataindex[:,0] = copy.deepcopy(z_coord.values)
+                newz_dataindex[:,1] = np.arange(len(z_coord.values))
+                newz_dataindex = newz_dataindex[np.argsort(newz_dataindex[:,0])]
+                signal_data.get_coordinate_object("Device Z").values = newz_dataindex[:,0]
+                slicer[z_coord.dimension_list[0]] = tuple(newz_dataindex[:,1].astype("int"))
+                signal_data.data = signal_data.data[tuple(slicer)]
+                # need to change the order of every other coordinate that is 
+                for coordinate in signal_data.coordinates:
+                    if z_coord.dimension_list == coordinate.dimension_list:
+                        coordinate.values = coordinate.values[newz_dataindex[:,1].astype("int")]
+                    
             return signal_data
                 
-
 
 def online_get_config(self_object, config=None, options={}):
     # The options keyword is passed on to the jetapi.getsignal() function
@@ -619,15 +638,7 @@ def get_signal_data(exp_id=None, data_name=None, no_data=False,
     configs = LiBESConfig(exp_id)
     
     # Finding the desired channels
-    if options['Amplitude calibration'] == "Spectrometer PPF" or \
-       options['Spatial calibration'] == "Spectrometer PPF":
-        # in this case one has to take into account that there are dead channels
-        # and there were mislabeled ones
-#        configs.get_fibre_config()
-        configs.read_apd_map()
-    else:
-        # only the dead channels are omitted from channels that can be used
-        configs.read_apd_map()
+    configs.read_apd_map()
     signal_name, signal_loc = configs.select_signals(data_name, options=options)
 
     # Obtaining the data for all channels in signal_name
