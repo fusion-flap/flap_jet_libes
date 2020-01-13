@@ -416,6 +416,11 @@ class LiBESConfig:
         return (signal_proc, new_signal_proc)
     
     def get_spect_ppf_map(self):
+        ''' Gets the spectrometer data from the server: the Z coordinate, the indexing and the amplitude calibration
+        for the channels.
+        Input: None
+        Output: None, but the self.spect_map numpy.ndarray is created
+        '''
         if hasattr(self, "KY6-Z") is False:
             self.get_config(config="KY6-Z", options={"UID":"KY6-team"})
         if hasattr(self, "KY6-Bind") is False:
@@ -432,6 +437,19 @@ class LiBESConfig:
         self.spect_ppf_map[2,:]=self.data["KY6-CrossCalib"].data/np.mean(self.data["KY6-CrossCalib"].data)       
 
     def amplitude_calib(self, signal_data, options={}):
+        ''''calibrates the amplitude of signal_data
+        INPUT: signal_data - the dataobject to calibrate
+               options - dictionary
+                     'Amplitude calibration' by default is read from the flap_defaults.cfg file
+                                             - set to 'Spectrometer BIG' uses the spectrometer calibration directly.
+                                               This is usually inaccurate.
+                                             - set to 'Spectrometer PPF' uses the spectrometer calibration directly, but
+                                               also corrects it with the average light profile of APDCAM and the 
+                                               spectrometer. Could be also used to get the relative calibration between 
+                                               the APDCAM and the spectrometer. This could be used to find out whether
+                                               there is a change in either of the detectors after the light splitting
+        OUTPUT: The calibrated dataobject
+        '''
         options_default = {'Amplitude calibration': flap.config.get("Module JET_LIBES","Amplitude calibration")}
         options = {**options_default, **options}
 
@@ -506,62 +524,70 @@ class LiBESConfig:
                     
 
     def spatial_calib(self, signal_data, options={}):
-            options_default = {'Spatial calibration': flap.config.get("Module JET_LIBES","Spatial calibration"),
-                               'Sort data with Device Z': True}
-            options = {**options_default, **options}
-            if options['Spatial calibration'] == "Spectrometer PPF":
-                if self.spect_ppf_map is None:
-                    self.get_spect_ppf_map()
+        ''''obtians the spatial calibration data
+        INPUT: signal_data - the dataobject to calibrate
+               options - dictionary
+                     'Spatial calibration' -  by default is read from the flap_defaults.cfg file
+                                           - 'Spectrometer PPF' - uses the spectrometer spatial calibration
+                     'Sort data with Device Z'  - whether to sort the dataobject along the Z coordinate. 'True' by default
+        OUTPUT: The calibrated dataobject
+        '''
+        options_default = {'Spatial calibration': flap.config.get("Module JET_LIBES","Spatial calibration"),
+                           'Sort data with Device Z': True}
+        options = {**options_default, **options}
+        if options['Spatial calibration'] == "Spectrometer PPF":
+            if self.spect_ppf_map is None:
+                self.get_spect_ppf_map()
 
-                channels = copy.deepcopy(signal_data.get_coordinate_object("Spectrometer Track"))
-                if len(channels.dimension_list)>1:
-                    raise ValueError("Spectrometer PPF Spatial calibration only works if the channels only vary along one dimension")
-                coord_val = np.zeros(len(channels.values))
-                missing_data_from_spect = False
-                index=0
-                for channel in channels.values:
-                    if channel == "0":
-                        missing_data_from_spect = True
-                        coord_val[index] = None # the channel is not connected to the spectrometer
-                    else:
-                        coord_val[index] = self.spect_ppf_map[1,np.where(self.spect_ppf_map[0,:]==int(channel))]
-                    index = index+1
-                if missing_data_from_spect is True:
-                    signal_data.info = signal_data.info + "Could not obtain Spectrometer PPF Z coordinate for a number of channels."+\
-                                       " They were not plugged into the spectrometer./n"
-                    coord_val[np.where(coord_val==0)] = None
-                channels.unit.name =  "Device Z"
-                channels.unit.unit =  "m"
-                channels.values = coord_val
-                signal_data.add_coordinate_object(channels)
-            
-            if options['Sort data with Device Z'] is True:
-                z_coord = signal_data.get_coordinate_object("Device Z")
-                if len(z_coord.dimension_list)>1:
-                    raise ValueError ("Can not sort data along Device Z, coordinate varies over multiple dimensions.")
-                for coordinate in signal_data.coordinates:
-                    if z_coord.dimension_list[0] in coordinate.dimension_list and \
-                    not (z_coord.dimension_list == coordinate.dimension_list):
-                        raise ValueError("Can not sort along Device Z, "+coordinate.name+" varies along"+
-                                         "multiple dimensions of the data and also varies with Device Z")
-            
-                slicer = [slice(None)]*len(signal_data.shape)
-                newz_dataindex = np.zeros([len(z_coord.values),2])
-                newz_dataindex[:,0] = copy.deepcopy(z_coord.values)
-                newz_dataindex[:,1] = np.arange(len(z_coord.values))
-                newz_dataindex = newz_dataindex[np.argsort(newz_dataindex[:,0])]
-                signal_data.get_coordinate_object("Device Z").values = newz_dataindex[:,0]
-                slicer[z_coord.dimension_list[0]] = tuple(newz_dataindex[:,1].astype("int"))
-                signal_data.data = signal_data.data[tuple(slicer)]
-                if signal_data.error is not None:
-                    signal_data.error = signal_data.error[tuple(slicer)]
-                # need to change the order of every other coordinate that is 
-                for coordinate in signal_data.coordinates:
-                    if z_coord.dimension_list == coordinate.dimension_list and coordinate.unit.name != "Device Z":
-                        coordinate.values = coordinate.values[newz_dataindex[:,1].astype("int")]
+            channels = copy.deepcopy(signal_data.get_coordinate_object("Spectrometer Track"))
+            if len(channels.dimension_list)>1:
+                raise ValueError("Spectrometer PPF Spatial calibration only works if the channels only vary along one dimension")
+            coord_val = np.zeros(len(channels.values))
+            missing_data_from_spect = False
+            index=0
+            for channel in channels.values:
+                if channel == "0":
+                    missing_data_from_spect = True
+                    coord_val[index] = None # the channel is not connected to the spectrometer
+                else:
+                    coord_val[index] = self.spect_ppf_map[1,np.where(self.spect_ppf_map[0,:]==int(channel))]
+                index = index+1
+            if missing_data_from_spect is True:
+                signal_data.info = signal_data.info + "Could not obtain Spectrometer PPF Z coordinate for a number of channels."+\
+                                   " They were not plugged into the spectrometer./n"
+                coord_val[np.where(coord_val==0)] = None
+            channels.unit.name =  "Device Z"
+            channels.unit.unit =  "m"
+            channels.values = coord_val
+            signal_data.add_coordinate_object(channels)
+        
+        if options['Sort data with Device Z'] is True:
+            z_coord = signal_data.get_coordinate_object("Device Z")
+            if len(z_coord.dimension_list)>1:
+                raise ValueError ("Can not sort data along Device Z, coordinate varies over multiple dimensions.")
+            for coordinate in signal_data.coordinates:
+                if z_coord.dimension_list[0] in coordinate.dimension_list and \
+                not (z_coord.dimension_list == coordinate.dimension_list):
+                    raise ValueError("Can not sort along Device Z, "+coordinate.name+" varies along"+
+                                     "multiple dimensions of the data and also varies with Device Z")
+        
+            slicer = [slice(None)]*len(signal_data.shape)
+            newz_dataindex = np.zeros([len(z_coord.values),2])
+            newz_dataindex[:,0] = copy.deepcopy(z_coord.values)
+            newz_dataindex[:,1] = np.arange(len(z_coord.values))
+            newz_dataindex = newz_dataindex[np.argsort(newz_dataindex[:,0])]
+            signal_data.get_coordinate_object("Device Z").values = newz_dataindex[:,0]
+            slicer[z_coord.dimension_list[0]] = tuple(newz_dataindex[:,1].astype("int"))
+            signal_data.data = signal_data.data[tuple(slicer)]
+            if signal_data.error is not None:
+                signal_data.error = signal_data.error[tuple(slicer)]
+            # need to change the order of every other coordinate that is 
+            for coordinate in signal_data.coordinates:
+                if z_coord.dimension_list == coordinate.dimension_list and coordinate.unit.name != "Device Z":
+                    coordinate.values = coordinate.values[newz_dataindex[:,1].astype("int")]
 
-            return signal_data
-                
+        return signal_data
+            
 
 def online_get_config(self_object, config=None, options={}):
     # The options keyword is passed on to the jetapi.getsignal() function
@@ -591,6 +617,14 @@ def offline_get_config(self_object, config=None):
                               " is not implemented yet")
 
 def online_get_chopper(self_object, options={}):
+    ''' Gets the chopper information from the server
+    INPUT: self_object - a LiBESConfig class dataobject. online_get_chopper is called as the get_chopper() function of 
+                         a LiBESConfig class if the 'Datapath = online' is set in the JET_LIBES module of
+                         flap_defaults.cfg
+            options - 'UID' - the user ID under which the data is searched for, can be set to a "team" as well
+            also creates the chopper dataobjects by calling chopper_timing_data_object()
+    OUTPUT: None
+    '''
     #obtaining the beam energy
     self_object.get_config(config='KY6-AccVoltage')
     self_object.get_config(config='KY6-EmitterVoltage')
@@ -616,22 +650,22 @@ def online_get_chopper(self_object, options={}):
     # generating the chopper dataobjects for slicing
     self_object.chopper_timing_data_object(options=options)
 
-    # getting the calibration time for the beam-in-gase phase
-    self_object.get_config(config='KY6-CalibTime', options={"UID": "KY6-team"})
-    start_calib = np.min(self_object.data['KY6-CalibTime'].data)
-    end_calib = np.max(self_object.data['KY6-CalibTime'].data)
-
-    for channel in range(0,32):
-        try:
-            location = "JPF/DH/KY6D-DOWN:"+str(channel+1).zfill(3)
-            data = jetapi.getsignal(self_object.exp_id, location)
-            break
-        except ValueError:
-            data = None
-    if data is None:
-        raise ValueError("No JPF KY6D data found for shot "+\
-                         str(self_object.exp_id))
-    return data
+#    # getting the calibration time for the beam-in-gase phase
+#    self_object.get_config(config='KY6-CalibTime', options={"UID": "KY6-team"})
+#    start_calib = np.min(self_object.data['KY6-CalibTime'].data)
+#    end_calib = np.max(self_object.data['KY6-CalibTime'].data)
+#
+#    for channel in range(0,32):
+#        try:
+#            location = "JPF/DH/KY6D-DOWN:"+str(channel+1).zfill(3)
+#            data = jetapi.getsignal(self_object.exp_id, location)
+#            break
+#        except ValueError:
+#            data = None
+#    if data is None:
+#        raise ValueError("No JPF KY6D data found for shot "+\
+#                         str(self_object.exp_id))
+#    return data
 
 def offline_get_chopper(self_object, config=None, options={}):
     pass
@@ -1038,24 +1072,6 @@ def jet_libes_get_data(exp_id=None, data_name=None, no_data=False,
     else:
         chspec = data_name
 
-#    # Finding read_range (timerange) and read_samplerange
-#    read_range = None
-#    if (coordinates is not None):
-#        if (type(coordinates) is not list):
-#             _coordinates = [coordinates]
-#        else:
-#            _coordinates = coordinates
-#        for coord in _coordinates:
-#            if (type(coord) is not flap.Coordinate):
-#                raise TypeError("Coordinate description should be flap.Coordinate.")
-#            if (coord.unit.name is 'Time'):
-#                if (coord.mode.equidistant):
-#                    read_range = np.asarray([float(coord.c_range[0]),float(coord.c_range[1])])
-#                    if (read_range[1] <= read_range[0]):
-#                        raise ValueError("Invalid read timerange.")
-#                else:
-#                    raise NotImplementedError("Non-equidistant Time axis is not implemented yet.")
-#                break
     
     if not (chspec == ["Chopper_time"]):
         # In this case the actual channel data is obtained
