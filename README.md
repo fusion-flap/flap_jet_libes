@@ -1,2 +1,2 @@
-# flap_jet_abes
+# flap_jet_libes
 FLAP module for JET Lithium Beam Emission diagnostic data
